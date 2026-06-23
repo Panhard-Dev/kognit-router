@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+base="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config_file="${ZCODE_CONFIG_FILE:-$HOME/.zcode/v2/config.json}"
+node_bin="$base/program/node/bin/node"
+
+token="$("$node_bin" -e '
+  const fs = require("fs");
+  const file = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  const token = config?.provider?.["builtin:zai-start-plan"]?.options?.apiKey;
+  if (!token) process.exit(2);
+  process.stdout.write(token);
+' "$config_file")"
+
+export ZCODE_AUTHORIZATION="Bearer $token"
+export ZCODE_PROXY_DATA_DIR="$base/data/glm5.2proxy"
+export ZCODE_PROXY_PORT="${ZCODE_PROXY_PORT:-3005}"
+export ZCODE_PROXY_HOST="${ZCODE_PROXY_HOST:-127.0.0.1}"
+export ZCODE_CAPTCHA_BRIDGE="true"
+export ZCODE_CAPTCHA_HEADLESS="${ZCODE_CAPTCHA_HEADLESS:-false}"
+export ZCODE_CAPTCHA_CLIENT_PREFERENCE="${ZCODE_CAPTCHA_CLIENT_PREFERENCE:-standalone-browser}"
+export ZCODE_CAPTCHA_HEADLESS_EXECUTABLE="${ZCODE_CAPTCHA_HEADLESS_EXECUTABLE:-/usr/bin/brave-browser}"
+export ZCODE_CAPTCHA_HEADLESS_PROFILE_DIR="$base/data/glm5.2proxy/captcha-brave-profile"
+export ZCODE_ACCOUNT_CREATOR_ENABLED="false"
+
+exec "$base/program/glm5.2proxy/glm5.2proxy-server"

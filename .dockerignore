@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.github
+.claude
+.kognit-runtime
+.venv-merge
+.venv-train
+*.log
+.env
+.env.*
+server/data.json
+data/glm5.2proxy
+program/node
+cloudflared.exe
+server/cloudflared.exe

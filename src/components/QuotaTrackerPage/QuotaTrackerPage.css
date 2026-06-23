@@ -1,0 +1,283 @@
+.quota {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 2rem 2.5rem 3rem;
+}
+
+.quota__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--bg-elevated);
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.quota__top > div > span {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.22em;
+  color: var(--text-ghost);
+}
+
+.quota__top h1 {
+  margin-top: 0.2rem;
+  font-family: var(--font-display);
+  font-size: 1.65rem;
+  color: var(--text-primary);
+}
+
+.quota__top p {
+  margin-top: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-ghost);
+}
+
+.quota__top button {
+  background: var(--text-primary);
+  color: #000;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.45rem 0.85rem;
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.quota__top button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.quota__empty {
+  border: 1px dashed var(--bg-elevated);
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-ghost);
+}
+
+/* Grid of cards */
+.quota__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.85rem;
+}
+
+/* Card */
+.quota-card {
+  background: #0d0d0d;
+  border: 1px solid #222;
+  border-radius: 12px;
+  padding: 1rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.quota-card__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.quota-card__identity {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.quota-card__identity > div {
+  min-width: 0;
+}
+
+.quota-card__logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.quota-card__identity strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quota-card__identity span {
+  display: block;
+  max-width: min(560px, 55vw);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quota-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.quota-card__count {
+  border: 1px solid #282828;
+  border-radius: 999px;
+  padding: 0.2rem 0.5rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  white-space: nowrap;
+}
+
+.quota-card__action {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.quota-card__action:hover {
+  color: var(--text-primary);
+  border-color: #555;
+}
+
+/* Quota rows */
+.quota-card__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-height: 470px;
+  padding: 0.15rem 0.4rem 0.15rem 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+.quota-row {
+  display: grid;
+  grid-template-columns: 8px minmax(190px, 1.2fr) minmax(180px, 2fr) 46px 118px;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.quota-row__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.quota-row__name {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: #ccc;
+  line-height: 1.25;
+}
+
+.quota-row__bar-area {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quota-row__numbers {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  color: var(--text-muted);
+}
+
+.quota-row__bar {
+  height: 4px;
+  background: #1a1a1a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.quota-row__bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.quota-row__pct {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-align: right;
+  font-weight: 600;
+}
+
+.quota-row__reset {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.quota-card__error {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: #f87171;
+}
+
+.quota-card__plan {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  color: var(--text-ghost);
+  text-align: right;
+}
+
+@media (max-width: 1050px) {
+  .quota-row {
+    grid-template-columns: 8px minmax(140px, 1.2fr) minmax(120px, 1.5fr) 42px 105px;
+  }
+}
+
+@media (max-width: 700px) {
+  .quota {
+    padding: 1.5rem 1rem 2rem;
+  }
+
+  .quota__top {
+    flex-direction: column;
+  }
+
+  .quota-row {
+    grid-template-columns: 8px minmax(120px, 1fr) 42px;
+    gap: 0.4rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid #171717;
+  }
+
+  .quota-row__bar-area {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
+
+  .quota-row__reset {
+    grid-column: 2 / 4;
+    grid-row: 3;
+  }
+}

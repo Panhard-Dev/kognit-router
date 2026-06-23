@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: kognit-router
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: KOGNIT_DATA_FILE
+        value: /var/data/kognit/data.json
+      - key: ZCODE_PROXY_DATA_DIR
+        value: /var/data/kognit/glm5.2proxy
+      - key: ZCODE_PROXY_PORT
+        value: 3075
+      - key: ZCODE_CAPTCHA_HEADLESS
+        value: "false"
+      - key: ZCODE_CAPTCHA_CLIENT_PREFERENCE
+        value: standalone-browser
+      - key: KOGNIT_ZCODE_ACCOUNTS_JSON
+        sync: false
+    disk:
+      name: kognit-data
+      mountPath: /var/data/kognit
+      sizeGB: 1

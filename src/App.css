@@ -1,0 +1,24 @@
+.app {
+  position: relative;
+  min-height: 100vh;
+  background: var(--bg-void);
+}
+
+.app__content {
+  margin-left: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  position: relative;
+  z-index: 1;
+}
+
+.app__content--providers,
+.app__content--usage,
+.app__content--quota,
+.app__content--cli {
+  justify-content: flex-start;
+  align-items: stretch;
+}

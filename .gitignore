@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+.claude/
+.kognit-runtime/
+.venv-merge/
+.venv-train/
+data/
+*.log
+*.sqlite
+*.db
+
+# Segredos e dados locais nao entram no Git
+server/data.json
+data/glm5.2proxy/
+program/node/
+server/*.log
+program/glm5.2proxy/*.before-*
+server/glm52proxy-start.original
+cloudflared.exe
+server/cloudflared.exe
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

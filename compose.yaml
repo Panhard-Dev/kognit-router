@@ -1,0 +1,20 @@
+services:
+  kognit:
+    build:
+      context: .
+    container_name: kognit
+    ports:
+      - "3001:10000"
+    environment:
+      PORT: "10000"
+      KOGNIT_PUBLIC_ORIGIN: "http://localhost:3001"
+      KOGNIT_ZCODE_ACCOUNTS_JSON: "${KOGNIT_ZCODE_ACCOUNTS_JSON:-}"
+      KOGNIT_ZCODE_TOKEN: "${KOGNIT_ZCODE_TOKEN:-}"
+      ZCODE_CAPTCHA_HEADLESS: "false"
+      ZCODE_CAPTCHA_CLIENT_PREFERENCE: "standalone-browser"
+    volumes:
+      - kognit-data:/var/data/kognit
+    restart: unless-stopped
+
+volumes:
+  kognit-data:
