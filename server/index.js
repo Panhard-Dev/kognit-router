@@ -7,6 +7,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { createServer as createHttpServer } from 'http'
 import https from 'https'
+import net from 'net'
 import {
   completeOAuthCallbackFromUrl,
   completeOAuthSession,
@@ -217,6 +218,7 @@ let glmProxyProcess = null
 let glmProxyStatus = { active: false, pid: null, error: null, startedAt: null }
 let glmProxyLogs = []
 let glmProxyShuttingDown = false
+let glmProxyRestartPromise = null
 
 function isGlmProxyAlive() {
   return !!glmProxyProcess && !glmProxyProcess.killed && glmProxyProcess.exitCode === null
@@ -355,13 +357,90 @@ function startGlmProxy(reason = 'boot') {
   return { started: true, pid: child.pid, reason }
 }
 
-function stopGlmProxy() {
-  glmProxyShuttingDown = true
-  if (isGlmProxyAlive()) {
-    try { glmProxyProcess.kill() } catch { /* noop */ }
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function waitForProcessExit(child, timeoutMs = 5000) {
+  if (!child || child.exitCode !== null || child.killed) return Promise.resolve(true)
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      child.off('exit', onExit)
+      resolve(false)
+    }, timeoutMs)
+    const onExit = () => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    child.once('exit', onExit)
+  })
+}
+
+function isTcpPortOpen(host, port) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ host, port })
+    socket.setTimeout(500)
+    socket.once('connect', () => {
+      socket.destroy()
+      resolve(true)
+    })
+    socket.once('timeout', () => {
+      socket.destroy()
+      resolve(false)
+    })
+    socket.once('error', () => resolve(false))
+  })
+}
+
+async function waitForTcpPortState(host, port, shouldBeOpen, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const open = await isTcpPortOpen(host, port)
+    if (open === shouldBeOpen) return true
+    await sleep(150)
   }
-  glmProxyProcess = null
+  return false
+}
+
+async function stopGlmProxy({ force = true } = {}) {
+  glmProxyShuttingDown = true
+  const child = glmProxyProcess
+  if (isGlmProxyAlive()) {
+    try { child.kill('SIGTERM') } catch { /* noop */ }
+    const exited = await waitForProcessExit(child, 5000)
+    if (!exited && force) {
+      try { child.kill('SIGKILL') } catch { /* noop */ }
+      await waitForProcessExit(child, 2000)
+    }
+  }
+  if (glmProxyProcess === child) glmProxyProcess = null
   glmProxyStatus = { active: false, pid: null, error: null, startedAt: null }
+  await waitForTcpPortState(GLM_PROXY_HOST, GLM_PROXY_PORT, false, 8000)
+}
+
+async function restartGlmProxy(reason = 'manual-restart') {
+  if (glmProxyRestartPromise) return glmProxyRestartPromise
+  glmProxyRestartPromise = (async () => {
+    console.log(`[glm-proxy] reinicio seguro solicitado (${reason})...`)
+    await stopGlmProxy()
+    glmProxyShuttingDown = false
+    const result = startGlmProxy(reason)
+    if (result.started) {
+      const ready = await waitForTcpPortState(GLM_PROXY_HOST, GLM_PROXY_PORT, true, 10000)
+      if (!ready) {
+        glmProxyStatus = {
+          active: isGlmProxyAlive(),
+          pid: glmProxyProcess?.pid ?? null,
+          error: `Proxy iniciou, mas a porta ${GLM_PROXY_PORT} nao respondeu a tempo.`,
+          startedAt: glmProxyStatus.startedAt,
+        }
+      }
+    }
+    return result
+  })().finally(() => {
+    glmProxyRestartPromise = null
+  })
+  return glmProxyRestartPromise
 }
 
 function previewSecret(secret) {
@@ -561,10 +640,10 @@ function saveOAuthProviderTokens(provider, tokens) {
 
   // OAuth do ZCode concluido: reinicia o proxy GLM com o token novo.
   if (provider.id === 'zcode-ai' && tokens.accessToken) {
-    console.log('[glm-proxy] novo token ZCode via OAuth, reiniciando proxy...')
-    stopGlmProxy()
-    glmProxyShuttingDown = false
-    startGlmProxy('oauth-refresh')
+    restartGlmProxy('oauth-refresh').catch(error => {
+      glmProxyStatus = { active: false, pid: null, error: error.message, startedAt: null }
+      console.error(`[glm-proxy] reinicio pos-OAuth falhou: ${error.message}`)
+    })
   }
 
   return connection
@@ -1450,6 +1529,7 @@ async function proxyOpenAICompatibleChat({
     let responseJson = null
     try {
       responseJson = JSON.parse(responseText)
+      normalizeOpenAICompatibleResponse(responseJson)
     } catch {
       responseJson = null
     }
@@ -1465,7 +1545,11 @@ async function proxyOpenAICompatibleChat({
       latencyMs: Date.now() - startedAt,
       tokens: responseJson?.usage,
     })
-    res.status(response.status).type(contentType).send(responseText)
+    if (responseJson) {
+      res.status(response.status).json(responseJson)
+    } else {
+      res.status(response.status).type(contentType).send(responseText)
+    }
   } catch (err) {
     const errorMessage = sanitizeErrorMessage(err.message)
     recordUsageEvent({
@@ -1484,6 +1568,25 @@ async function proxyOpenAICompatibleChat({
       error: { message: errorMessage, type: 'upstream_error' },
     })
   }
+}
+
+function normalizeOpenAICompatibleResponse(data) {
+  if (!data || !Array.isArray(data.choices)) return data
+
+  for (const choice of data.choices) {
+    const message = choice?.message
+    if (!message || message.content !== null && message.content !== undefined) continue
+    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) continue
+
+    const fallbackText = message.reasoning
+      || message.reasoning_content
+      || choice.text
+      || ''
+
+    message.content = typeof fallbackText === 'string' ? fallbackText : ''
+  }
+
+  return data
 }
 
 async function testGeminiApiKeyModel(connection, model) {
@@ -2050,6 +2153,7 @@ app.get('/api/glm-proxy/status', async (req, res) => {
   const token = resolveZCodeToken()
   res.json({
     active: isGlmProxyAlive(),
+    restarting: !!glmProxyRestartPromise,
     pid: glmProxyProcess?.pid ?? null,
     host: GLM_PROXY_HOST,
     port: GLM_PROXY_PORT,
@@ -3312,7 +3416,7 @@ function geminiToOpenaiResponse(geminiRes, model, requestId) {
   }
 }
 
-app.get('/v1/models', (req, res) => {
+app.get(['/v1/models', '/models', '/v1/v1/models'], (req, res) => {
   const seen = new Map()
   const addModel = (id, ownedBy) => {
     const modelId = String(id || '').trim()
@@ -3347,9 +3451,9 @@ app.get('/v1/models', (req, res) => {
   res.json({ object: 'list', data: [...seen.values()] })
 })
 
-app.post('/v1/chat/completions', async (req, res) => {
+app.post(['/v1/chat/completions', '/chat/completions', '/v1/v1/chat/completions'], async (req, res) => {
   const startedAt = Date.now()
-  const route = '/v1/chat/completions'
+  const route = req.path
   let requestedModel = req.body?.model || 'ag/gemini-3-flash'
   let upstreamModel = ''
   let provider = resolveModelProvider(requestedModel)
@@ -3755,21 +3859,233 @@ function writeAnthropicStreamMessage(res, message) {
   res.end()
 }
 
-app.post('/v1/messages', async (req, res) => {
+function anthropicContentToText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(block => {
+    if (!block) return ''
+    if (typeof block === 'string') return block
+    if (block.type === 'text') return block.text || ''
+    if (block.type === 'tool_result') {
+      if (typeof block.content === 'string') return block.content
+      if (Array.isArray(block.content)) return block.content.map(item => item?.text || '').filter(Boolean).join('\n')
+      return ''
+    }
+    if (block.type === 'image') return '[image]'
+    return ''
+  }).filter(Boolean).join('\n')
+}
+
+function anthropicSystemToText(system) {
+  if (typeof system === 'string') return system
+  if (!Array.isArray(system)) return ''
+  return system.map(block => block?.text || '').filter(Boolean).join('\n')
+}
+
+function anthropicMessagesToOpenaiMessages(messages, system) {
+  const converted = []
+  const systemText = anthropicSystemToText(system)
+  if (systemText) converted.push({ role: 'system', content: systemText })
+
+  for (const message of messages || []) {
+    const role = message?.role === 'assistant' ? 'assistant' : 'user'
+    converted.push({
+      role,
+      content: anthropicContentToText(message?.content),
+    })
+  }
+
+  return converted
+}
+
+function openaiCompatibleResponseToAnthropic(data, model) {
+  const choice = data?.choices?.[0] || {}
+  const message = choice.message || {}
+  const content = []
+  const text = anthropicContentToText(message.content ?? message.reasoning ?? message.reasoning_content ?? choice.text ?? '')
+
+  if (text) content.push({ type: 'text', text })
+
+  for (const toolCall of message.tool_calls || []) {
+    if (toolCall.type !== 'function') continue
+    let input
+    try {
+      input = JSON.parse(toolCall.function?.arguments || '{}')
+    } catch {
+      input = {}
+    }
+    content.push({
+      type: 'tool_use',
+      id: toolCall.id || `toolu_${uuidv4().slice(0, 8)}`,
+      name: toolCall.function?.name || 'tool',
+      input,
+    })
+  }
+
+  const finishReason = choice.finish_reason
+  const stopReason = finishReason === 'length'
+    ? 'max_tokens'
+    : finishReason === 'tool_calls'
+      ? 'tool_use'
+      : 'end_turn'
+
+  return {
+    id: 'msg_' + uuidv4().replace(/-/g, '').slice(0, 24),
+    type: 'message',
+    role: 'assistant',
+    model,
+    content: content.length > 0 ? content : [{ type: 'text', text: '' }],
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage: {
+      input_tokens: data?.usage?.prompt_tokens || 0,
+      output_tokens: data?.usage?.completion_tokens || 0,
+    },
+  }
+}
+
+async function proxyAnthropicCompatibleViaOpenAI({
+  req,
+  res,
+  route,
+  startedAt,
+  providerId,
+  providerName,
+  requestedModel,
+  upstreamModel,
+}) {
+  const selected = selectProviderConnection(providerId)
+  if (selected.error) {
+    recordUsageEvent({
+      route,
+      providerId,
+      providerName,
+      model: requestedModel,
+      upstreamModel,
+      ok: false,
+      statusCode: 503,
+      latencyMs: Date.now() - startedAt,
+      errorType: 'service_unavailable',
+      error: selected.error,
+    })
+    return res.status(503).json({
+      type: 'error',
+      error: { type: 'api_error', message: selected.error },
+    })
+  }
+
+  const { db, connection, transient } = selected
+
+  try {
+    await ensureModelCredential(connection)
+    const target = openAICompatibleTarget(providerId, connection)
+    if (!target) {
+      throw new Error(`O provider ${providerName} ainda nao possui proxy OpenAI-compatible no Kognit.`)
+    }
+
+    if (!transient) saveData(db)
+    const authHeader = target.authHeader === false ? null : (target.authHeader || 'Authorization')
+    const authValue = target.token && authHeader
+      ? { [authHeader]: target.bearer === false ? target.token : `Bearer ${target.token}` }
+      : {}
+
+    const response = await fetchWithTimeout(target.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...authValue,
+        ...target.headers,
+      },
+      body: JSON.stringify({
+        model: upstreamModel,
+        messages: anthropicMessagesToOpenaiMessages(req.body.messages, req.body.system),
+        max_tokens: req.body.max_tokens || 16384,
+        ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
+        stream: false,
+      }),
+    }, target.timeoutMs || MODEL_TEST_TIMEOUT_MS)
+
+    if (!response.ok) {
+      const errorMessage = sanitizeErrorMessage(await response.text().catch(() => ''))
+      recordUsageEvent({
+        route,
+        providerId,
+        providerName: connection.providerName || providerName,
+        model: requestedModel,
+        upstreamModel,
+        ok: false,
+        statusCode: response.status,
+        latencyMs: Date.now() - startedAt,
+        errorType: 'upstream_error',
+        error: errorMessage,
+      })
+      return res.status(response.status).json({
+        type: 'error',
+        error: { type: 'api_error', message: errorMessage },
+      })
+    }
+
+    const data = await response.json()
+    const anthropicRes = openaiCompatibleResponseToAnthropic(data, requestedModel)
+    recordUsageEvent({
+      route,
+      providerId,
+      providerName: connection.providerName || providerName,
+      model: requestedModel,
+      upstreamModel,
+      ok: true,
+      statusCode: 200,
+      latencyMs: Date.now() - startedAt,
+      tokens: anthropicRes.usage,
+    })
+
+    if (req.body.stream === true) {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.setHeader('Connection', 'keep-alive')
+      return writeAnthropicStreamMessage(res, anthropicRes)
+    }
+
+    return res.json(anthropicRes)
+  } catch (err) {
+    const statusCode = err.statusCode || 500
+    const errorMessage = sanitizeErrorMessage(err.message)
+    recordUsageEvent({
+      route,
+      providerId,
+      providerName,
+      model: requestedModel,
+      upstreamModel,
+      ok: false,
+      statusCode,
+      latencyMs: Date.now() - startedAt,
+      errorType: err.code || 'api_error',
+      error: errorMessage,
+    })
+    return res.status(statusCode).json({
+      type: 'error',
+      error: { type: err.code || 'api_error', message: errorMessage },
+    })
+  }
+}
+
+app.post(['/v1/messages', '/messages', '/v1/v1/messages'], async (req, res) => {
   const startedAt = Date.now()
-  const route = '/v1/messages'
+  const route = req.path
   let requestedModel = req.body?.model || 'ag/claude-sonnet-4-6'
   let upstreamModel = ''
 
   try {
     const { model, messages, system, max_tokens, temperature } = req.body
     requestedModel = model || 'ag/claude-sonnet-4-6'
+    const provider = resolveModelProvider(requestedModel)
 
     if (!messages || !Array.isArray(messages)) {
       recordUsageEvent({
         route,
-        providerId: 'antigravity',
-        providerName: 'Antigravity',
+        providerId: provider.id,
+        providerName: provider.name,
         model: requestedModel,
         ok: false,
         statusCode: 400,
@@ -3780,7 +4096,19 @@ app.post('/v1/messages', async (req, res) => {
       return res.status(400).json({ type: 'error', error: { type: 'invalid_request_error', message: 'messages is required' } })
     }
 
-    upstreamModel = resolveUpstreamModel('antigravity', requestedModel, null)
+    upstreamModel = resolveUpstreamModel(provider.id, requestedModel, null)
+    if (provider.id !== 'antigravity') {
+      return await proxyAnthropicCompatibleViaOpenAI({
+        req,
+        res,
+        route,
+        startedAt,
+        providerId: provider.id,
+        providerName: provider.name,
+        requestedModel,
+        upstreamModel,
+      })
+    }
 
     const { connection, error } = selectProviderConnection('antigravity')
     if (error) {
@@ -4359,6 +4687,28 @@ app.delete('/api/cli-tools/:toolId/configuration', async (req, res) => {
   }
 })
 
+app.use((req, res, next) => {
+  const apiLikeRoute =
+    req.path === '/v1'
+    || req.path.startsWith('/v1/')
+    || req.path.startsWith('/api/')
+    || ['/models', '/chat/completions', '/messages'].includes(req.path)
+
+  if (!apiLikeRoute) return next()
+
+  const message = `Rota API nao encontrada: ${req.method} ${req.path}. Use /v1/models, /v1/chat/completions ou /v1/messages.`
+  if (req.path.endsWith('/messages')) {
+    return res.status(404).json({
+      type: 'error',
+      error: { type: 'not_found_error', message },
+    })
+  }
+
+  return res.status(404).json({
+    error: { type: 'not_found_error', message },
+  })
+})
+
 // --- SERVE FRONTEND ON THE SAME PORT ---
 const distPath = path.join(ROOT, 'dist')
 const serveDist = process.env.NODE_ENV === 'production' || process.env.KOGNIT_SERVE_DIST === '1'
@@ -4404,12 +4754,13 @@ httpServer.listen(PORT, () => {
 })
 
 // Shutdown gracioso: mata o proxy antes de sair.
-function shutdownGlmProxy(signal) {
+async function shutdownGlmProxy(signal) {
   if (glmProxyShuttingDown) return
   console.log(`[glm-proxy] encerrando (${signal})...`)
-  stopGlmProxy()
+  const exitTimer = setTimeout(() => process.exit(0), 10000)
+  exitTimer.unref()
+  await stopGlmProxy()
   httpServer.close(() => process.exit(0))
-  setTimeout(() => process.exit(0), 5000).unref()
 }
 process.on('SIGTERM', () => shutdownGlmProxy('SIGTERM'))
 process.on('SIGINT', () => shutdownGlmProxy('SIGINT'))
