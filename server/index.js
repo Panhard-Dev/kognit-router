@@ -1,5 +1,6 @@
 import express from 'express'
 import cors from 'cors'
+import crypto from 'crypto'
 import { v4 as uuidv4 } from 'uuid'
 import { spawn, execSync, spawnSync } from 'child_process'
 import fs from 'fs'
@@ -47,6 +48,28 @@ app.use((err, req, res, next) => {
 
 // --- API KEY AUTH MIDDLEWARE ---
 // Validates API keys on /v1/* and /api/* routes when requireApiKey is enabled.
+function timingSafeStringEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  if (a.length !== b.length) {
+    try { crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)) } catch { /* noop */ }
+    return false
+  }
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b))
+}
+
+const ADMIN_TOKEN = process.env.KOGNIT_ADMIN_TOKEN || ''
+
+function adminAuthMiddleware(req, res, next) {
+  if (!ADMIN_TOKEN) return next()
+  const token = cleanBearerToken(req.headers['x-admin-token'] || req.headers.authorization || '')
+  if (!token || token !== ADMIN_TOKEN) {
+    return res.status(403).json({
+      error: { message: 'Admin authentication required. Set x-admin-token header.', type: 'authorization_error' },
+    })
+  }
+  next()
+}
+
 function apiKeyAuthMiddleware(req, res, next) {
   let db
   try {
@@ -64,7 +87,7 @@ function apiKeyAuthMiddleware(req, res, next) {
     })
   }
 
-  const keyExists = db.keys.some(k => k.secret === token && k.active !== false)
+  const keyExists = db.keys.some(k => k.active !== false && timingSafeStringEqual(k.secret, token))
   if (!keyExists) {
     return res.status(401).json({
       error: { message: 'Invalid or inactive API key.', type: 'authentication_error' },
@@ -77,7 +100,26 @@ function apiKeyAuthMiddleware(req, res, next) {
 // Apply auth to both proxy and admin API routes
 app.use(['/v1', '/api'], apiKeyAuthMiddleware)
 
+// Apply admin auth to write operations on /api routes
+app.use('/api', (req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return adminAuthMiddleware(req, res, next)
+  }
+  next()
+})
+
 const DATA_FILE = process.env.KOGNIT_DATA_FILE || path.join(__dirname, 'data.json')
+
+// --- IN-MEMORY DATA CACHE (Bug 5 fix) ---
+let _cachedData = null
+let _lastLoaded = 0
+let _writeQueue = Promise.resolve()
+const DATA_CACHE_TTL_MS = 2000
+
+try {
+  fs.watch(DATA_FILE, { persistent: false }, () => { _cachedData = null })
+} catch { /* fs.watch may not support all platforms */ }
+
 const IS_WINDOWS = process.platform === 'win32'
 const CLOUDFLARED_BIN_NAME = IS_WINDOWS ? 'cloudflared.exe' : 'cloudflared'
 const CLOUDFLARED_PATH = path.join(__dirname, CLOUDFLARED_BIN_NAME)
@@ -94,14 +136,24 @@ app.use(cors({
 // Simple in-memory rate limiter for /v1 and /api routes.
 const RATE_LIMIT_WINDOW_MS = 60 * 1000
 const RATE_LIMIT_MAX = Number(process.env.KOGNIT_RATE_LIMIT_MAX || 120)
-const rateLimitHits = new Map()
-setInterval(() => { rateLimitHits.clear() }, RATE_LIMIT_WINDOW_MS)
+const rateLimitHits = new Map() // Map<ip, number[]>
 
 function rateLimitMiddleware(req, res, next) {
   const ip = req.ip || req.socket.remoteAddress || 'unknown'
-  const count = (rateLimitHits.get(ip) || 0) + 1
-  rateLimitHits.set(ip, count)
-  if (count > RATE_LIMIT_MAX) {
+  const now = Date.now()
+  const windowStart = now - RATE_LIMIT_WINDOW_MS
+  const hits = (rateLimitHits.get(ip) || []).filter(t => t > windowStart)
+  hits.push(now)
+  rateLimitHits.set(ip, hits)
+
+  // Periodic cleanup of stale entries (probabilistic to avoid full scan every request)
+  if (hits.length === 1 && Math.random() < 0.02) {
+    for (const [key, val] of rateLimitHits.entries()) {
+      if (val.length === 0 || val[val.length - 1] <= windowStart) rateLimitHits.delete(key)
+    }
+  }
+
+  if (hits.length > RATE_LIMIT_MAX) {
     return res.status(429).json({ error: { message: 'Too many requests. Please slow down.', type: 'rate_limit_error' } })
   }
   next()
@@ -199,18 +251,34 @@ function writeDataFile(data) {
   fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true })
   const temporaryFile = `${DATA_FILE}.${process.pid}.tmp`
   fs.writeFileSync(temporaryFile, JSON.stringify(data, null, 2), { mode: 0o600 })
-  fs.renameSync(temporaryFile, DATA_FILE)
+  try {
+    fs.renameSync(temporaryFile, DATA_FILE)
+  } catch (err) {
+    if (err.code === 'EXDEV') {
+      fs.copyFileSync(temporaryFile, DATA_FILE)
+      fs.unlinkSync(temporaryFile)
+    } else {
+      throw err
+    }
+  }
   try { fs.chmodSync(DATA_FILE, 0o600) } catch { /* filesystem may not support chmod */ }
 }
 
 function loadData() {
+  const now = Date.now()
+  if (_cachedData && (now - _lastLoaded) < DATA_CACHE_TTL_MS) {
+    return _cachedData
+  }
+
   if (!fs.existsSync(DATA_FILE)) {
     const initial = createInitialData()
     writeDataFile(initial)
+    _cachedData = initial
+    _lastLoaded = now
     return initial
   }
   const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8').replace(/^\uFEFF/, ''))
-  return {
+  const result = {
     keys: Array.isArray(data.keys) ? data.keys : [],
     providers: Array.isArray(data.providers) ? data.providers : [],
     providerConnections: Array.isArray(data.providerConnections) ? data.providerConnections : [],
@@ -220,10 +288,19 @@ function loadData() {
     tunnelUrl: data.tunnelUrl ?? null,
     requireApiKey: data.requireApiKey === true,
   }
+  _cachedData = result
+  _lastLoaded = now
+  return result
 }
 
 function saveData(data) {
-  writeDataFile(data)
+  _writeQueue = _writeQueue.then(() => {
+    _cachedData = data
+    _lastLoaded = Date.now()
+    writeDataFile(data)
+  }).catch(err => {
+    console.error('[KOGNIT] saveData failed:', err.message)
+  })
 }
 
 function normalizeOrigin(origin) {
@@ -1567,7 +1644,16 @@ async function proxyOpenAICompatibleChat({
       res.setHeader('Connection', 'keep-alive')
 
       const reader = response.body.getReader()
+      let clientAborted = false
+      req.on('close', () => {
+        clientAborted = true
+        try { reader.cancel() } catch { /* noop */ }
+      })
       while (true) {
+        if (clientAborted) {
+          try { reader.cancel() } catch { /* noop */ }
+          break
+        }
         const { done, value } = await reader.read()
         if (done) break
         res.write(Buffer.from(value))
@@ -2807,6 +2893,23 @@ app.patch('/api/settings', (req, res) => {
 // --- USAGE ANALYTICS ---
 
 const MAX_USAGE_EVENTS = 2000
+const USAGE_FLUSH_INTERVAL_MS = 30_000
+let _usageBuffer = []
+
+function flushUsageBuffer() {
+  if (_usageBuffer.length === 0) return
+  try {
+    const db = loadData()
+    db.usageEvents = [...db.usageEvents, ..._usageBuffer].slice(-MAX_USAGE_EVENTS)
+    _usageBuffer = []
+    saveData(db)
+  } catch (err) {
+    console.warn(`Usage flush failed: ${err.message}`)
+  }
+}
+
+const usageFlushTimer = setInterval(flushUsageBuffer, USAGE_FLUSH_INTERVAL_MS)
+usageFlushTimer.unref()
 
 function safeNumber(value) {
   const number = Number(value)
@@ -2822,7 +2925,6 @@ function normalizeUsageTokens(tokens = {}) {
 
 function recordUsageEvent(event) {
   try {
-    const db = loadData()
     const tokens = normalizeUsageTokens(event.tokens)
     const safeEvent = {
       id: uuidv4(),
@@ -2840,11 +2942,10 @@ function recordUsageEvent(event) {
       error: event.ok ? '' : sanitizeErrorMessage(event.error),
     }
 
-    db.usageEvents = [...db.usageEvents, safeEvent].slice(-MAX_USAGE_EVENTS)
-    saveData(db)
+    _usageBuffer.push(safeEvent)
     return safeEvent
   } catch (err) {
-    console.warn(`Usage analytics write failed: ${err.message}`)
+    console.warn(`Usage analytics buffer failed: ${err.message}`)
     return null
   }
 }
@@ -3171,7 +3272,8 @@ async function autoRefreshAllTokens() {
   }
 }
 
-setInterval(autoRefreshAllTokens, 30 * 60 * 1000)
+const autoRefreshTimer = setInterval(autoRefreshAllTokens, 30 * 60 * 1000)
+autoRefreshTimer.unref()
 setTimeout(autoRefreshAllTokens, 5000)
 
 function sanitizeGeminiFunctionName(name) {
@@ -3373,6 +3475,22 @@ function summarizeCompactedMessage(message, index) {
   return `${index + 1}. ${role}${suffix}${text ? `: ${text}` : ''}`
 }
 
+function ensureRoleAlternation(messages) {
+  if (!Array.isArray(messages) || messages.length <= 1) return messages
+  const result = []
+  let lastRole = null
+  for (const msg of messages) {
+    const role = msg.role || 'user'
+    if (role === lastRole) {
+      const fillerRole = role === 'user' ? 'assistant' : 'user'
+      result.push({ role: fillerRole, content: 'Understood.' })
+    }
+    result.push(msg)
+    lastRole = msg.role
+  }
+  return result
+}
+
 function compactMessagesForProvider(messages, protocol) {
   if (!Array.isArray(messages)) return messages
 
@@ -3411,7 +3529,7 @@ function compactMessagesForProvider(messages, protocol) {
     ? { role: 'assistant', content: 'Understood. I will continue using the compacted history and the recent tool results.' }
     : { role: 'assistant', content: 'Understood. I will continue using the compacted history and the recent tool results.' }
 
-  return [...first, summaryMessage, ackMessage, ...recent]
+  return ensureRoleAlternation([...first, summaryMessage, ackMessage, ...recent])
 }
 
 function normalizeGeminiFunctionResponse(content) {
@@ -3566,7 +3684,10 @@ function geminiToOpenaiResponse(geminiRes, model, requestId) {
     choices: [{
       index: 0,
       message,
-      finish_reason: functionCalls.length > 0 ? 'tool_calls' : candidate?.finishReason === 'MAX_TOKENS' ? 'length' : 'stop',
+      finish_reason: functionCalls.length > 0 ? 'tool_calls'
+        : candidate?.finishReason === 'MAX_TOKENS' ? 'length'
+          : (candidate?.finishReason === 'SAFETY' || candidate?.finishReason === 'RECITATION') ? 'content_filter'
+            : 'stop',
     }],
     usage: {
       prompt_tokens: usage.promptTokenCount || 0,
@@ -3740,12 +3861,22 @@ app.post(['/v1/chat/completions', '/chat/completions', '/v1/v1/chat/completions'
       let chunkIndex = 0
       let fullText = ''
       let hasToolCalls = false
+      const emittedToolCallKeys = new Set()
 
       const reader = response.body.getReader()
+      let clientAborted = false
+      req.on('close', () => {
+        clientAborted = true
+        try { reader.cancel() } catch { /* noop */ }
+      })
       const decoder = new TextDecoder()
       let buffer = ''
 
       while (true) {
+        if (clientAborted) {
+          try { reader.cancel() } catch { /* noop */ }
+          break
+        }
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
@@ -3787,6 +3918,9 @@ app.post(['/v1/chat/completions', '/chat/completions', '/v1/v1/chat/completions'
               for (let i = 0; i < functionCalls.length; i++) {
                 const fcPart = functionCalls[i]
                 const fc = fcPart.functionCall
+                const callKey = `${fc.name}:${JSON.stringify(fc.args || {})}`
+                if (emittedToolCallKeys.has(callKey)) continue
+                emittedToolCallKeys.add(callKey)
                 const toolCallId = 'call_' + uuidv4().slice(0, 8)
                 cacheGeminiFunctionCallPart(toolCallId, fcPart)
                 const toolChunk = {
@@ -3815,7 +3949,10 @@ app.post(['/v1/chat/completions', '/chat/completions', '/v1/v1/chat/completions'
 
             const finishReason = candidate?.finishReason
             if (finishReason) {
-              const fr = hasToolCalls ? 'tool_calls' : finishReason === 'MAX_TOKENS' ? 'length' : 'stop'
+              const fr = hasToolCalls ? 'tool_calls'
+                : finishReason === 'MAX_TOKENS' ? 'length'
+                  : (finishReason === 'SAFETY' || finishReason === 'RECITATION') ? 'content_filter'
+                    : 'stop'
               const finishChunk = {
                 id: responseId,
                 object: 'chat.completion.chunk',
@@ -4406,12 +4543,21 @@ app.post(['/v1/messages', '/messages', '/v1/v1/messages'], async (req, res) => {
       res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`)
 
       const reader = response.body.getReader()
+      let clientAborted = false
+      req.on('close', () => {
+        clientAborted = true
+        try { reader.cancel() } catch { /* noop */ }
+      })
       const decoder = new TextDecoder()
       let buffer = ''
       const streamedFunctionCalls = []
       const streamedFunctionCallKeys = new Set()
 
       while (true) {
+        if (clientAborted) {
+          try { reader.cancel() } catch { /* noop */ }
+          break
+        }
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
@@ -4939,6 +5085,8 @@ httpServer.listen(PORT, () => {
 async function shutdownGlmProxy(signal) {
   if (glmProxyShuttingDown) return
   console.log(`[glm-proxy] encerrando (${signal})...`)
+  clearInterval(usageFlushTimer)
+  flushUsageBuffer()
   const exitTimer = setTimeout(() => process.exit(0), 10000)
   exitTimer.unref()
   await stopGlmProxy()

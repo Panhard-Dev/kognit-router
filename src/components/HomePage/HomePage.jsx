@@ -76,6 +76,7 @@ export default function HomePage() {
       }
       const key = await res.json()
       setKeys([...keys, key])
+      alert(`Key criada com sucesso!\n\nNome: ${key.name}\nSecret: ${key.secret}\n\n⚠️ Guarde este secret agora — ele não será exibido novamente.`)
     } catch {
       alert('Falha ao conectar ao servidor')
     }
