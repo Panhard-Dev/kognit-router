@@ -32,7 +32,6 @@ const ROOT = path.join(__dirname, '..')
 const app = express()
 const httpServer = createHttpServer(app)
 const REQUEST_BODY_LIMIT = process.env.KOGNIT_REQUEST_BODY_LIMIT || '50mb'
-app.use(cors())
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }))
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {
@@ -47,41 +46,36 @@ app.use((err, req, res, next) => {
 })
 
 // --- API KEY AUTH MIDDLEWARE ---
-// Validates API keys on /v1/* routes when requireApiKey is enabled.
+// Validates API keys on /v1/* and /api/* routes when requireApiKey is enabled.
 function apiKeyAuthMiddleware(req, res, next) {
+  let db
   try {
-    const db = loadData()
-    if (!db.requireApiKey) return next()
+    db = loadData()
   } catch {
-    return next()
+    return next() // fail-open only if data file is unreadable
   }
 
-  const authHeader = req.headers.authorization || ''
-  const token = cleanBearerToken(authHeader)
+  if (!db.requireApiKey) return next()
 
+  const token = cleanBearerToken(req.headers.authorization || '')
   if (!token) {
     return res.status(401).json({
       error: { message: 'API key required. Pass it via Authorization: Bearer <key> header.', type: 'authentication_error' },
     })
   }
 
-  try {
-    const db = loadData()
-    const keyExists = db.keys.some(k => k.secret === token && k.active !== false)
-    if (!keyExists) {
-      return res.status(401).json({
-        error: { message: 'Invalid or inactive API key.', type: 'authentication_error' },
-      })
-    }
-  } catch {
-    // If data file is temporarily unavailable, allow request through.
+  const keyExists = db.keys.some(k => k.secret === token && k.active !== false)
+  if (!keyExists) {
+    return res.status(401).json({
+      error: { message: 'Invalid or inactive API key.', type: 'authentication_error' },
+    })
   }
 
   next()
 }
 
-// Apply auth to /v1 API routes
-app.use('/v1', apiKeyAuthMiddleware)
+// Apply auth to both proxy and admin API routes
+app.use(['/v1', '/api'], apiKeyAuthMiddleware)
 
 const DATA_FILE = process.env.KOGNIT_DATA_FILE || path.join(__dirname, 'data.json')
 const IS_WINDOWS = process.platform === 'win32'
@@ -92,7 +86,29 @@ const PORT = process.env.PORT || 3001
 const LOCAL_API_ORIGIN = process.env.KOGNIT_LOCAL_ORIGIN || process.env.KOGNIT_LOCAL_API_ORIGIN || `http://localhost:${PORT}`
 const PUBLIC_ORIGIN = process.env.KOGNIT_PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || ''
 
-app.set('trust proxy', 1)
+app.use(cors({
+  origin: process.env.KOGNIT_CORS_ORIGIN || PUBLIC_ORIGIN || `http://localhost:${PORT}`,
+  credentials: true,
+}))
+
+// Simple in-memory rate limiter for /v1 and /api routes.
+const RATE_LIMIT_WINDOW_MS = 60 * 1000
+const RATE_LIMIT_MAX = Number(process.env.KOGNIT_RATE_LIMIT_MAX || 120)
+const rateLimitHits = new Map()
+setInterval(() => { rateLimitHits.clear() }, RATE_LIMIT_WINDOW_MS)
+
+function rateLimitMiddleware(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown'
+  const count = (rateLimitHits.get(ip) || 0) + 1
+  rateLimitHits.set(ip, count)
+  if (count > RATE_LIMIT_MAX) {
+    return res.status(429).json({ error: { message: 'Too many requests. Please slow down.', type: 'rate_limit_error' } })
+  }
+  next()
+}
+app.use(['/v1', '/api'], rateLimitMiddleware)
+
+app.set('trust proxy', process.env.KOGNIT_TRUST_PROXY === '1' ? 1 : false)
 
 function cleanBearerToken(value) {
   return String(value || '').trim().replace(/^Bearer\s+/i, '')
@@ -2737,7 +2753,7 @@ app.delete('/api/providers/:id', (req, res) => {
 
 app.get('/api/keys', (req, res) => {
   const db = loadData()
-  res.json(db.keys)
+  res.json(db.keys.map(k => ({ ...k, secret: undefined, preview: k.preview || k.secret.slice(0, 7) + '...' })))
 })
 
 app.post('/api/keys', (req, res) => {
