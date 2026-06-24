@@ -7,9 +7,19 @@ const BASE64_BLOCK_SIZE = 4
 const oauthSessions = new Map()
 const callbackServers = new Map()
 const SESSION_TTL_MS = 30 * 60 * 1000 // 30 minutes
+const MAX_OAUTH_SESSIONS = 200
+
+function evictOldestOAuthSessions() {
+  if (oauthSessions.size <= MAX_OAUTH_SESSIONS) return
+  const entries = [...oauthSessions.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)
+  for (const [id] of entries) {
+    if (oauthSessions.size <= MAX_OAUTH_SESSIONS) break
+    oauthSessions.delete(id)
+  }
+}
 
 // Periodic cleanup of expired OAuth sessions and idle callback servers.
-setInterval(() => {
+const oauthCleanupTimer = setInterval(() => {
   const now = Date.now()
   for (const [id, session] of oauthSessions.entries()) {
     if (now - session.createdAt > SESSION_TTL_MS) oauthSessions.delete(id)
@@ -22,6 +32,7 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000)
+oauthCleanupTimer.unref()
 
 function getOAuthPlatformEnum() {
   const os = platform()
@@ -222,7 +233,7 @@ const OAUTH_PROVIDERS = {
     flowType: 'authorization_code',
     config: {
       clientId: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
-      clientSecret: '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',
+      clientSecret: process.env.GEMINI_CLI_CLIENT_SECRET || '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',
       authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
       tokenUrl: 'https://oauth2.googleapis.com/token',
       userInfoUrl: 'https://www.googleapis.com/oauth2/v1/userinfo',
@@ -304,8 +315,8 @@ const OAUTH_PROVIDERS = {
     category: 'oauth',
     flowType: 'authorization_code',
     config: {
-      clientId: '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com',
-      clientSecret: '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',
+      clientId: process.env.ANTIGRAVITY_CLIENT_ID || '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com',
+      clientSecret: process.env.ANTIGRAVITY_CLIENT_SECRET || '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',
       authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
       tokenUrl: 'https://oauth2.googleapis.com/token',
       userInfoUrl: 'https://www.googleapis.com/oauth2/v1/userinfo',
@@ -829,6 +840,7 @@ export async function createBrowserOAuthSession(providerId, backendOrigin) {
   }
 
   oauthSessions.set(sessionId, session)
+  evictOldestOAuthSessions()
   if (provider.fixedPort) await startFixedCallbackServer(provider.fixedPort, provider.callbackPath || '/callback')
 
   return {
@@ -872,6 +884,7 @@ export async function createDeviceOAuthSession(providerId, options = {}) {
   }
 
   oauthSessions.set(sessionId, session)
+  evictOldestOAuthSessions()
 
   return {
     sessionId,

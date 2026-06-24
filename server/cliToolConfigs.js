@@ -19,6 +19,8 @@ function configuredPath(envName, fallback) {
   return fallback
 }
 
+// NOTE: This version appends /v1 for CLI tool configs. server/index.js has a
+// different normalizeBaseUrl that does NOT append /v1 — used for provider URLs.
 function normalizeBaseUrl(value) {
   const baseUrl = String(value || '').trim().replace(/\/+$/, '')
   return baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1`

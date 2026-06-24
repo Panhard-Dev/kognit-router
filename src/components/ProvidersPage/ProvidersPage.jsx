@@ -487,7 +487,7 @@ function ProviderDetail({
                   <div className="connection-card__main">
                     <strong>{connection.name}</strong>
                     <span>{connection.email || connection.baseUrl || connection.defaultModel || modeLabels[connection.connectionMode]}</span>
-                    <code>{connection.secretPreview || connection.refreshPreview || 'sem secret exposto'}</code>
+                    <code>{connection.secretPreview || 'sem secret exposto'}</code>
                   </div>
                   <div className="connection-card__meta">
                     <em className={`connection-card__status connection-card__status--${connection.testStatus || 'untested'}`}>
