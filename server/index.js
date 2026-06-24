@@ -303,7 +303,7 @@ function startGlmProxy(reason = 'boot') {
     ZCODE_PROXY_HOST: GLM_PROXY_HOST,
     ZCODE_PROXY_PORT: String(GLM_PROXY_PORT),
     ZCODE_CAPTCHA_BRIDGE: process.env.ZCODE_CAPTCHA_BRIDGE || 'true',
-    ZCODE_CAPTCHA_HEADLESS: process.env.ZCODE_CAPTCHA_HEADLESS || 'false',
+    ZCODE_CAPTCHA_HEADLESS: process.env.ZCODE_CAPTCHA_HEADLESS || 'true',
     ZCODE_CAPTCHA_CLIENT_PREFERENCE: process.env.ZCODE_CAPTCHA_CLIENT_PREFERENCE || 'standalone-browser',
     ZCODE_CAPTCHA_HEADLESS_EXECUTABLE: resolveCaptchaBrowserExecutable(),
     ZCODE_CAPTCHA_HEADLESS_PROFILE_DIR: process.env.ZCODE_CAPTCHA_HEADLESS_PROFILE_DIR
@@ -1465,6 +1465,11 @@ async function proxyOpenAICompatibleChat({
     const authValue = target.token && authHeader
       ? { [authHeader]: target.bearer === false ? target.token : `Bearer ${target.token}` }
       : {}
+    const upstreamBody = sanitizePayloadForProvider(providerId, {
+      ...req.body,
+      model: upstreamModel,
+    })
+
     const response = await fetch(target.url, {
       method: 'POST',
       headers: {
@@ -1473,14 +1478,11 @@ async function proxyOpenAICompatibleChat({
         ...authValue,
         ...target.headers,
       },
-      body: JSON.stringify({
-        ...req.body,
-        model: upstreamModel,
-      }),
+      body: JSON.stringify(upstreamBody),
     })
 
     if (!response.ok) {
-      const errorMessage = sanitizeErrorMessage(await response.text().catch(() => ''))
+      const errorMessage = readableUpstreamError(providerId, await response.text().catch(() => ''))
       recordUsageEvent({
         route,
         providerId,
@@ -1551,7 +1553,7 @@ async function proxyOpenAICompatibleChat({
       res.status(response.status).type(contentType).send(responseText)
     }
   } catch (err) {
-    const errorMessage = sanitizeErrorMessage(err.message)
+    const errorMessage = explainZCodeAsciiError(sanitizeErrorMessage(err.message))
     recordUsageEvent({
       route,
       providerId,
@@ -1587,6 +1589,83 @@ function normalizeOpenAICompatibleResponse(data) {
   }
 
   return data
+}
+
+const ZCODE_ASCII_REPLACEMENTS = new Map([
+  ['—', '-'],
+  ['–', '-'],
+  ['−', '-'],
+  ['“', '"'],
+  ['”', '"'],
+  ['„', '"'],
+  ['‘', "'"],
+  ['’', "'"],
+  ['‚', "'"],
+  ['…', '...'],
+  ['•', '-'],
+  ['→', '->'],
+  ['←', '<-'],
+  ['×', 'x'],
+  ['©', '(c)'],
+  ['®', '(r)'],
+  ['™', '(tm)'],
+  ['°', ' degrees'],
+])
+
+function asciiSafeForZCode(value) {
+  let text = String(value)
+  for (const [from, to] of ZCODE_ASCII_REPLACEMENTS) {
+    text = text.split(from).join(to)
+  }
+  text = text
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+  return Array.from(text)
+    .filter(char => {
+      const code = char.charCodeAt(0)
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126)
+    })
+    .join('')
+}
+
+function sanitizePayloadForProvider(providerId, value) {
+  if (providerId !== 'zcode-ai' || process.env.ZCODE_FORCE_UTF8 === '1') return value
+  if (typeof value === 'string') return asciiSafeForZCode(value)
+  if (Array.isArray(value)) return value.map(item => sanitizePayloadForProvider(providerId, item))
+  if (!value || typeof value !== 'object') return value
+
+  const sanitized = {}
+  for (const [key, item] of Object.entries(value)) {
+    sanitized[key] = sanitizePayloadForProvider(providerId, item)
+  }
+  return sanitized
+}
+
+function explainZCodeAsciiError(errorMessage) {
+  if (!/ascii.+codec|ordinal not in range|can't encode character/i.test(String(errorMessage || ''))) {
+    return errorMessage
+  }
+  return `${errorMessage} | O KOGNIT normalizou caracteres Unicode para ASCII antes de enviar ao ZCode. Tente novamente; se repetir, ha algum caractere especial vindo do cliente ou ferramenta.`
+}
+
+function readableUpstreamError(providerId, rawText) {
+  const sanitized = sanitizeErrorMessage(rawText)
+  let message = sanitized
+  let type = ''
+
+  try {
+    const parsed = JSON.parse(rawText)
+    message = parsed?.error?.message || parsed?.message || message
+    type = parsed?.error?.type || parsed?.type || ''
+  } catch {
+    // Keep sanitized raw text.
+  }
+
+  if (providerId === 'zcode-ai' && /captcha/i.test(`${type} ${message}`)) {
+    return 'A Z.ai pediu CAPTCHA. Abra o Solver CAPTCHA Z.ai no painel do KOGNIT, deixe a caixa carregada, resolva se aparecer desafio e tente novamente.'
+  }
+
+  return explainZCodeAsciiError(sanitizeErrorMessage(message))
 }
 
 async function testGeminiApiKeyModel(connection, model) {
@@ -2163,7 +2242,7 @@ app.get('/api/glm-proxy/status', async (req, res) => {
     recentLogs: glmProxyLogs.slice(-25),
     captcha: {
       bridge: process.env.ZCODE_CAPTCHA_BRIDGE || 'true',
-      headless: process.env.ZCODE_CAPTCHA_HEADLESS || 'false',
+      headless: process.env.ZCODE_CAPTCHA_HEADLESS || 'true',
       clientPreference: process.env.ZCODE_CAPTCHA_CLIENT_PREFERENCE || 'standalone-browser',
       browserUrl: '/zcode/captcha/browser?client=standalone-browser',
     },
@@ -2362,7 +2441,7 @@ app.post('/api/provider-models/test', async (req, res) => {
     })
     res.status(result.ok ? 200 : 400).json(result)
   } catch (err) {
-    const errorMessage = sanitizeErrorMessage(err.message)
+    const errorMessage = explainZCodeAsciiError(sanitizeErrorMessage(err.message))
     recordUsageEvent({
       route: '/api/provider-models/test',
       providerId: providerId || 'unknown',
@@ -3989,6 +4068,14 @@ async function proxyAnthropicCompatibleViaOpenAI({
       ? { [authHeader]: target.bearer === false ? target.token : `Bearer ${target.token}` }
       : {}
 
+    const upstreamBody = sanitizePayloadForProvider(providerId, {
+      model: upstreamModel,
+      messages: anthropicMessagesToOpenaiMessages(req.body.messages, req.body.system),
+      max_tokens: req.body.max_tokens || 16384,
+      ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
+      stream: false,
+    })
+
     const response = await fetchWithTimeout(target.url, {
       method: 'POST',
       headers: {
@@ -3997,17 +4084,11 @@ async function proxyAnthropicCompatibleViaOpenAI({
         ...authValue,
         ...target.headers,
       },
-      body: JSON.stringify({
-        model: upstreamModel,
-        messages: anthropicMessagesToOpenaiMessages(req.body.messages, req.body.system),
-        max_tokens: req.body.max_tokens || 16384,
-        ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
-        stream: false,
-      }),
+      body: JSON.stringify(upstreamBody),
     }, target.timeoutMs || MODEL_TEST_TIMEOUT_MS)
 
     if (!response.ok) {
-      const errorMessage = sanitizeErrorMessage(await response.text().catch(() => ''))
+      const errorMessage = readableUpstreamError(providerId, await response.text().catch(() => ''))
       recordUsageEvent({
         route,
         providerId,
