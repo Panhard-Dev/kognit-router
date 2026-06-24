@@ -20,3 +20,7 @@ docker compose up --build
 ```
 
 O container não abre navegador próprio para CAPTCHA. Quando a Z.ai exigir clique humano, abra o provider ZCode no painel e use a caixa "Solver CAPTCHA Z.ai" ou acesse `/zcode/captcha/browser?client=standalone-browser`.
+
+## Licença
+
+Distribuído sob a licença [GPL-3.0](./LICENSE). Veja o arquivo `LICENSE` para detalhes.
