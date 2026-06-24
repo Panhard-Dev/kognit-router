@@ -6,6 +6,22 @@ const BASE64_BLOCK_SIZE = 4
 
 const oauthSessions = new Map()
 const callbackServers = new Map()
+const SESSION_TTL_MS = 30 * 60 * 1000 // 30 minutes
+
+// Periodic cleanup of expired OAuth sessions and idle callback servers.
+setInterval(() => {
+  const now = Date.now()
+  for (const [id, session] of oauthSessions.entries()) {
+    if (now - session.createdAt > SESSION_TTL_MS) oauthSessions.delete(id)
+  }
+  for (const [port, server] of callbackServers.entries()) {
+    const hasActive = [...oauthSessions.values()].some(s => s.fixedPort === port || s.callbackUrl?.includes(`:${port}`))
+    if (!hasActive) {
+      try { server.close() } catch { /* noop */ }
+      callbackServers.delete(port)
+    }
+  }
+}, 5 * 60 * 1000)
 
 function getOAuthPlatformEnum() {
   const os = platform()

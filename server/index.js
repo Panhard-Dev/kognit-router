@@ -1,4 +1,5 @@
 import express from 'express'
+import cors from 'cors'
 import { v4 as uuidv4 } from 'uuid'
 import { spawn, execSync, spawnSync } from 'child_process'
 import fs from 'fs'
@@ -31,6 +32,7 @@ const ROOT = path.join(__dirname, '..')
 const app = express()
 const httpServer = createHttpServer(app)
 const REQUEST_BODY_LIMIT = process.env.KOGNIT_REQUEST_BODY_LIMIT || '50mb'
+app.use(cors())
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }))
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {
@@ -44,9 +46,48 @@ app.use((err, req, res, next) => {
   return next(err)
 })
 
+// --- API KEY AUTH MIDDLEWARE ---
+// Validates API keys on /v1/* routes when requireApiKey is enabled.
+function apiKeyAuthMiddleware(req, res, next) {
+  try {
+    const db = loadData()
+    if (!db.requireApiKey) return next()
+  } catch {
+    return next()
+  }
+
+  const authHeader = req.headers.authorization || ''
+  const token = cleanBearerToken(authHeader)
+
+  if (!token) {
+    return res.status(401).json({
+      error: { message: 'API key required. Pass it via Authorization: Bearer <key> header.', type: 'authentication_error' },
+    })
+  }
+
+  try {
+    const db = loadData()
+    const keyExists = db.keys.some(k => k.secret === token && k.active !== false)
+    if (!keyExists) {
+      return res.status(401).json({
+        error: { message: 'Invalid or inactive API key.', type: 'authentication_error' },
+      })
+    }
+  } catch {
+    // If data file is temporarily unavailable, allow request through.
+  }
+
+  next()
+}
+
+// Apply auth to /v1 API routes
+app.use('/v1', apiKeyAuthMiddleware)
+
 const DATA_FILE = process.env.KOGNIT_DATA_FILE || path.join(__dirname, 'data.json')
-const CLOUDFLARED_PATH = path.join(__dirname, 'cloudflared.exe')
-const ROOT_CLOUDFLARED_PATH = path.join(ROOT, 'cloudflared.exe')
+const IS_WINDOWS = process.platform === 'win32'
+const CLOUDFLARED_BIN_NAME = IS_WINDOWS ? 'cloudflared.exe' : 'cloudflared'
+const CLOUDFLARED_PATH = path.join(__dirname, CLOUDFLARED_BIN_NAME)
+const ROOT_CLOUDFLARED_PATH = path.join(ROOT, CLOUDFLARED_BIN_NAME)
 const PORT = process.env.PORT || 3001
 const LOCAL_API_ORIGIN = process.env.KOGNIT_LOCAL_ORIGIN || process.env.KOGNIT_LOCAL_API_ORIGIN || `http://localhost:${PORT}`
 const PUBLIC_ORIGIN = process.env.KOGNIT_PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || ''
@@ -74,6 +115,7 @@ function createInitialData() {
     cliToolSettings: {},
     usageEvents: [],
     tunnelUrl: null,
+    requireApiKey: process.env.KOGNIT_REQUIRE_API_KEY === 'true',
   }
 
   let accounts = []
@@ -160,6 +202,7 @@ function loadData() {
     cliToolSettings: data.cliToolSettings && typeof data.cliToolSettings === 'object' ? data.cliToolSettings : {},
     usageEvents: Array.isArray(data.usageEvents) ? data.usageEvents : [],
     tunnelUrl: data.tunnelUrl ?? null,
+    requireApiKey: data.requireApiKey === true,
   }
 }
 
@@ -597,7 +640,7 @@ function createConnectionRecord(data) {
     enabled: true,
     priority: nextPriority,
     status: 'active',
-    testStatus: 'active',
+    testStatus: 'untested',
     lastTested: now,
     created: now,
     updated: now,
@@ -1151,7 +1194,7 @@ async function refreshKiroToken(connection) {
 const OAUTH_REFRESH_CONFIGS = {
   'claude-code': { tokenUrl: 'https://api.anthropic.com/v1/oauth/token', clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', pkce: true },
   'openai-codex': { tokenUrl: 'https://auth.openai.com/oauth/token', clientId: 'app_EMoamEEZ73f0CkXaXp7hrann', pkce: true },
-  'gemini-cli': { tokenUrl: 'https://oauth2.googleapis.com/token', clientId: '012777658812-l5km4htjgbn7i3skpud34rv3lrku0nr2.apps.googleusercontent.com', clientSecret: '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', pkce: false },
+  'gemini-cli': { tokenUrl: 'https://oauth2.googleapis.com/token', clientId: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com', clientSecret: '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', pkce: false },
   'github-copilot': { tokenUrl: 'https://github.com/login/oauth/access_token', clientId: 'Iv1.b507a08c87ecfe98', clientSecret: '', pkce: false },
   'cline': { tokenUrl: null },
   'kilo-code': { tokenUrl: null },
@@ -2033,7 +2076,8 @@ function getCloudflaredBin() {
   const candidates = []
 
   try {
-    const output = execSync('where.exe cloudflared', {
+    const whichCmd = IS_WINDOWS ? 'where.exe cloudflared' : 'which cloudflared'
+    const output = execSync(whichCmd, {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })
@@ -2056,9 +2100,16 @@ function getCloudflaredBin() {
   return null
 }
 
+function cloudflaredDownloadUrl() {
+  const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux'
+  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64'
+  const ext = platform === 'windows' ? '.exe' : ''
+  return `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${platform}-${arch}${ext}`
+}
+
 function downloadCloudflared() {
   return new Promise((resolve, reject) => {
-    const url = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+    const url = cloudflaredDownloadUrl()
     const tempPath = `${CLOUDFLARED_PATH}.download`
 
     function follow(u) {
@@ -2079,7 +2130,7 @@ function downloadCloudflared() {
             fs.renameSync(tempPath, CLOUDFLARED_PATH)
             if (!isCloudflaredUsable(CLOUDFLARED_PATH)) {
               fs.rmSync(CLOUDFLARED_PATH, { force: true })
-              reject(new Error('cloudflared baixado, mas o executavel nao roda neste Windows'))
+              reject(new Error(`cloudflared baixado, mas nao roda nesta plataforma (${process.platform}/${process.arch})`))
               return
             }
             resolve(CLOUDFLARED_PATH)
@@ -2723,6 +2774,20 @@ app.delete('/api/keys/:id', (req, res) => {
   res.json({ success: true })
 })
 
+app.get('/api/settings', (req, res) => {
+  const db = loadData()
+  res.json({ requireApiKey: db.requireApiKey || false })
+})
+
+app.patch('/api/settings', (req, res) => {
+  const db = loadData()
+  if (req.body.requireApiKey !== undefined) {
+    db.requireApiKey = !!req.body.requireApiKey
+  }
+  saveData(db)
+  res.json({ requireApiKey: db.requireApiKey || false })
+})
+
 // --- USAGE ANALYTICS ---
 
 const MAX_USAGE_EVENTS = 2000
@@ -2935,8 +3000,8 @@ app.get('/api/usage/analytics', (req, res) => {
 
 // --- V1 PROXY (OpenAI-compatible) ---
 
-const ANTIGRAVITY_CLIENT_ID = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
-const ANTIGRAVITY_CLIENT_SECRET = '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'
+const ANTIGRAVITY_CLIENT_ID = process.env.ANTIGRAVITY_CLIENT_ID || '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
+const ANTIGRAVITY_CLIENT_SECRET = process.env.ANTIGRAVITY_CLIENT_SECRET || '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'
 const ANTIGRAVITY_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const ANTIGRAVITY_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent'
 const ANTIGRAVITY_STREAM_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse'
@@ -2945,7 +3010,7 @@ const ANTIGRAVITY_LOAD_CODE_ASSIST_ENDPOINT = 'https://cloudcode-pa.googleapis.c
 function antigravityClientMetadata() {
   return {
     ideType: 9,
-    platform: process.platform === 'win32' ? 2 : process.platform === 'darwin' ? 3 : 1,
+    platform: os.platform() === 'win32' ? 5 : os.platform() === 'darwin' ? (os.arch() === 'arm64' ? 2 : 1) : (os.arch() === 'arm64' ? 4 : 3),
     pluginType: 2,
   }
 }
@@ -3660,83 +3725,93 @@ app.post(['/v1/chat/completions', '/chat/completions', '/v1/v1/chat/completions'
       let fullText = ''
       let hasToolCalls = false
 
-      const text = await response.text()
-      const lines = text.split(/\r?\n/)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const jsonStr = line.slice(6).trim()
-        if (!jsonStr || jsonStr === '[DONE]') continue
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
 
-        try {
-          const parsed = JSON.parse(jsonStr)
-          const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0]
-          const parts = candidate?.content?.parts || []
-          const partText = parts.filter(p => p.text).map(p => p.text).join('')
-          const functionCalls = parts.filter(p => p.functionCall)
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ''
 
-          if (partText) {
-            fullText += partText
-            const sseChunk = {
-              id: responseId,
-              object: 'chat.completion.chunk',
-              created,
-              model: requestedModel,
-              choices: [{
-                index: 0,
-                delta: chunkIndex === 0 ? { role: 'assistant', content: partText } : { content: partText },
-                finish_reason: null,
-              }],
-            }
-            res.write(`data: ${JSON.stringify(sseChunk)}\n\n`)
-            chunkIndex++
-          }
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const jsonStr = line.slice(6).trim()
+          if (!jsonStr || jsonStr === '[DONE]') continue
 
-          if (functionCalls.length > 0) {
-            hasToolCalls = true
-            for (let i = 0; i < functionCalls.length; i++) {
-              const fcPart = functionCalls[i]
-              const fc = fcPart.functionCall
-              const toolCallId = 'call_' + uuidv4().slice(0, 8)
-              cacheGeminiFunctionCallPart(toolCallId, fcPart)
-              const toolChunk = {
+          try {
+            const parsed = JSON.parse(jsonStr)
+            const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0]
+            const parts = candidate?.content?.parts || []
+            const partText = parts.filter(p => p.text).map(p => p.text).join('')
+            const functionCalls = parts.filter(p => p.functionCall)
+
+            if (partText) {
+              fullText += partText
+              const sseChunk = {
                 id: responseId,
                 object: 'chat.completion.chunk',
                 created,
                 model: requestedModel,
                 choices: [{
                   index: 0,
-                  delta: {
-                    ...(chunkIndex === 0 ? { role: 'assistant' } : {}),
-                    tool_calls: [{
-                      index: i,
-                      id: toolCallId,
-                      type: 'function',
-                      function: { name: fc.name, arguments: JSON.stringify(fc.args || {}) },
-                    }],
-                  },
+                  delta: chunkIndex === 0 ? { role: 'assistant', content: partText } : { content: partText },
                   finish_reason: null,
                 }],
               }
-              res.write(`data: ${JSON.stringify(toolChunk)}\n\n`)
+              res.write(`data: ${JSON.stringify(sseChunk)}\n\n`)
               chunkIndex++
             }
-          }
 
-          const finishReason = candidate?.finishReason
-          if (finishReason) {
-            const fr = hasToolCalls ? 'tool_calls' : finishReason === 'MAX_TOKENS' ? 'length' : 'stop'
-            const finishChunk = {
-              id: responseId,
-              object: 'chat.completion.chunk',
-              created,
-              model: requestedModel,
-              choices: [{ index: 0, delta: {}, finish_reason: fr }],
+            if (functionCalls.length > 0) {
+              hasToolCalls = true
+              for (let i = 0; i < functionCalls.length; i++) {
+                const fcPart = functionCalls[i]
+                const fc = fcPart.functionCall
+                const toolCallId = 'call_' + uuidv4().slice(0, 8)
+                cacheGeminiFunctionCallPart(toolCallId, fcPart)
+                const toolChunk = {
+                  id: responseId,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model: requestedModel,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      ...(chunkIndex === 0 ? { role: 'assistant' } : {}),
+                      tool_calls: [{
+                        index: i,
+                        id: toolCallId,
+                        type: 'function',
+                        function: { name: fc.name, arguments: JSON.stringify(fc.args || {}) },
+                      }],
+                    },
+                    finish_reason: null,
+                  }],
+                }
+                res.write(`data: ${JSON.stringify(toolChunk)}\n\n`)
+                chunkIndex++
+              }
             }
-            res.write(`data: ${JSON.stringify(finishChunk)}\n\n`)
+
+            const finishReason = candidate?.finishReason
+            if (finishReason) {
+              const fr = hasToolCalls ? 'tool_calls' : finishReason === 'MAX_TOKENS' ? 'length' : 'stop'
+              const finishChunk = {
+                id: responseId,
+                object: 'chat.completion.chunk',
+                created,
+                model: requestedModel,
+                choices: [{ index: 0, delta: {}, finish_reason: fr }],
+              }
+              res.write(`data: ${JSON.stringify(finishChunk)}\n\n`)
+            }
+          } catch {
+            // Ignore malformed upstream SSE chunks.
           }
-        } catch {
-          // Ignore malformed upstream SSE chunks.
         }
       }
 
@@ -4314,34 +4389,44 @@ app.post(['/v1/messages', '/messages', '/v1/v1/messages'], async (req, res) => {
       // Send content_block_start
       res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`)
 
-      const text = await response.text()
-      const lines = text.split(/\r?\n/)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
       const streamedFunctionCalls = []
       const streamedFunctionCallKeys = new Set()
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const jsonStr = line.slice(6).trim()
-        if (!jsonStr || jsonStr === '[DONE]') continue
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
 
-        try {
-          const parsed = JSON.parse(jsonStr)
-          const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0]
-          const parts = candidate?.content?.parts || []
-          const partText = parts.map(p => p.text).filter(Boolean).join('')
-          const functionCalls = parts.filter(p => p.functionCall)
-          if (partText) {
-            fullText += partText
-            res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: partText } })}\n\n`)
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const jsonStr = line.slice(6).trim()
+          if (!jsonStr || jsonStr === '[DONE]') continue
+
+          try {
+            const parsed = JSON.parse(jsonStr)
+            const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0]
+            const parts = candidate?.content?.parts || []
+            const partText = parts.map(p => p.text).filter(Boolean).join('')
+            const functionCalls = parts.filter(p => p.functionCall)
+            if (partText) {
+              fullText += partText
+              res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: partText } })}\n\n`)
+            }
+            for (const fc of functionCalls) {
+              const key = `${fc.functionCall.name}:${JSON.stringify(fc.functionCall.args || {})}`
+              if (streamedFunctionCallKeys.has(key)) continue
+              streamedFunctionCallKeys.add(key)
+              streamedFunctionCalls.push(fc)
+            }
+          } catch {
+            // Ignore malformed upstream SSE chunks.
           }
-          for (const fc of functionCalls) {
-            const key = `${fc.functionCall.name}:${JSON.stringify(fc.functionCall.args || {})}`
-            if (streamedFunctionCallKeys.has(key)) continue
-            streamedFunctionCallKeys.add(key)
-            streamedFunctionCalls.push(fc)
-          }
-        } catch {
-          // Ignore malformed upstream SSE chunks.
         }
       }
 

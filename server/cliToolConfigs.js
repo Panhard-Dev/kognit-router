@@ -53,7 +53,12 @@ async function writeText(filePath, content) {
 
 async function readJson(filePath, fallback = null) {
   const content = await readText(filePath, '')
-  return content ? JSON.parse(content) : fallback
+  if (!content) return fallback
+  try {
+    return JSON.parse(content)
+  } catch {
+    return fallback
+  }
 }
 
 async function writeJson(filePath, value) {

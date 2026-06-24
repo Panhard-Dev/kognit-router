@@ -31,6 +31,11 @@ export default function HomePage() {
       .then(r => r.json())
       .then(setKeys)
       .catch(() => {})
+
+    fetch(`${API}/settings`)
+      .then(r => r.json())
+      .then(data => setRequireKey(data.requireApiKey || false))
+      .catch(() => {})
   }, [])
 
   async function toggleTunnel() {
@@ -226,7 +231,15 @@ export default function HomePage() {
             <span className="home__token-desc">Requests without a valid key will be rejected</span>
           </div>
           <label className="home__toggle">
-            <input type="checkbox" checked={requireKey} onChange={() => setRequireKey(!requireKey)} />
+            <input type="checkbox" checked={requireKey} onChange={async () => {
+              const next = !requireKey
+              setRequireKey(next)
+              await fetch(`${API}/settings`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ requireApiKey: next }),
+              }).catch(() => setRequireKey(!next))
+            }} />
             <span className="home__toggle-slider"></span>
           </label>
         </div>
