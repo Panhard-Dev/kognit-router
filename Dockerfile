@@ -15,6 +15,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build --chown=node:node /app /app
 
+RUN npm prune --omit=dev
+
 RUN chmod +x /app/program/glm5.2proxy/glm5.2proxy-server /app/server/chromium-container \
   && mkdir -p /var/data/kognit \
   && chown -R node:node /var/data/kognit

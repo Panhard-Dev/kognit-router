@@ -86,16 +86,20 @@ function effectiveApiKey(inputKey, currentKey) {
   return String(inputKey || '').trim() || currentKey || LOCAL_API_KEY
 }
 
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function upsertEnv(text, key, value) {
   const line = `${key}=${value}`
-  const pattern = new RegExp(`^${key}=.*$`, 'm')
+  const pattern = new RegExp(`^${escapeRegex(key)}=.*$`, 'm')
   if (pattern.test(text)) return text.replace(pattern, line)
   if (!text) return `${line}\n`
   return `${text.replace(/\s*$/, '')}\n${line}\n`
 }
 
 function removeEnv(text, key) {
-  return text.replace(new RegExp(`^${key}=.*(?:\\r?\\n|$)`, 'm'), '')
+  return text.replace(new RegExp(`^${escapeRegex(key)}=.*(?:\\r?\\n|$)`, 'm'), '')
 }
 
 function publicConfig(config) {

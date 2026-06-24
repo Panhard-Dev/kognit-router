@@ -1044,6 +1044,10 @@ export default function ProvidersPage() {
           fetch(`${API}/provider-connections`),
           fetch(`${API}/provider-settings`),
         ])
+        if (!connectionsRes.ok || !settingsRes.ok) {
+          setLoadError('Backend retornou erro. Verifique as credenciais.')
+          return
+        }
         const connections = await connectionsRes.json()
         const settings = await settingsRes.json()
         setConnectionsByProvider(groupConnections(Array.isArray(connections) ? connections : []))
@@ -1089,32 +1093,46 @@ export default function ProvidersPage() {
       [provider.id]: { ...current, roundRobin: nextRoundRobin },
     }))
 
-    const res = await fetch(`${API}/provider-settings/${provider.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roundRobin: nextRoundRobin }),
-    })
-    const saved = await res.json()
-    setSettingsByProvider(settings => ({ ...settings, [provider.id]: saved }))
+    try {
+      const res = await fetch(`${API}/provider-settings/${provider.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roundRobin: nextRoundRobin }),
+      })
+      if (!res.ok) {
+        setSettingsByProvider(settings => ({ ...settings, [provider.id]: current }))
+        return
+      }
+      const saved = await res.json()
+      setSettingsByProvider(settings => ({ ...settings, [provider.id]: saved }))
+    } catch {
+      setSettingsByProvider(settings => ({ ...settings, [provider.id]: current }))
+    }
   }
 
   async function toggleConnection(connection) {
     setBusyConnectionId(connection.id)
-    const res = await fetch(`${API}/provider-connections/${connection.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !connection.enabled }),
-    })
-    const updated = await res.json()
-    upsertConnection(updated)
+    try {
+      const res = await fetch(`${API}/provider-connections/${connection.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !connection.enabled }),
+      })
+      if (!res.ok) return
+      const updated = await res.json()
+      upsertConnection(updated)
+    } catch { /* ignore */ }
     setBusyConnectionId(null)
   }
 
   async function testConnection(connection) {
     setBusyConnectionId(connection.id)
-    const res = await fetch(`${API}/provider-connections/${connection.id}/test`, { method: 'POST' })
-    const updated = await res.json()
-    upsertConnection(updated)
+    try {
+      const res = await fetch(`${API}/provider-connections/${connection.id}/test`, { method: 'POST' })
+      if (!res.ok) return
+      const updated = await res.json()
+      upsertConnection(updated)
+    } catch { /* ignore */ }
     setBusyConnectionId(null)
   }
 
@@ -1158,8 +1176,10 @@ export default function ProvidersPage() {
   async function deleteConnection(connection) {
     if (!confirm(`Delete ${connection.name}?`)) return
     setBusyConnectionId(connection.id)
-    await fetch(`${API}/provider-connections/${connection.id}`, { method: 'DELETE' })
-    removeConnection(connection)
+    try {
+      const res = await fetch(`${API}/provider-connections/${connection.id}`, { method: 'DELETE' })
+      if (res.ok) removeConnection(connection)
+    } catch { /* ignore */ }
     setBusyConnectionId(null)
   }
 

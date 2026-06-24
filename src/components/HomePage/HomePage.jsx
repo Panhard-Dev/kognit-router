@@ -40,60 +40,65 @@ export default function HomePage() {
 
   async function toggleTunnel() {
     setTunnelError(null)
-    if (tunnelActive) {
-      setTunnelLoading(true)
-      const res = await fetch(`${API}/tunnel/stop`, { method: 'POST' })
+    setTunnelLoading(true)
+    try {
+      const endpoint = tunnelActive ? 'stop' : 'start'
+      const res = await fetch(`${API}/tunnel/${endpoint}`, { method: 'POST' })
       const data = await res.json()
-      setTunnelActive(data.active)
-      setTunnelUrl(data.url)
       setLocalUrl(data.localUrl || localUrl)
-      setTunnelLoading(false)
-    } else {
-      setTunnelLoading(true)
-      try {
-        const res = await fetch(`${API}/tunnel/start`, { method: 'POST' })
-        const data = await res.json()
-        setLocalUrl(data.localUrl || localUrl)
-        if (!res.ok || data.error) {
-          setTunnelError(data.error)
-          setTunnelActive(false)
-          setTunnelUrl(null)
-        } else {
-          setTunnelActive(data.active)
-          setTunnelUrl(data.url)
-        }
-      } catch {
-        setTunnelError('Backend não acessível. Rode: node server/index.js')
+      if (!res.ok || data.error) {
+        setTunnelError(data.error)
+        setTunnelActive(false)
+        setTunnelUrl(null)
+      } else {
+        setTunnelActive(data.active)
+        setTunnelUrl(data.url)
       }
-      setTunnelLoading(false)
+    } catch {
+      setTunnelError('Backend não acessível. Rode: node server/index.js')
     }
+    setTunnelLoading(false)
   }
 
   async function createKey() {
     const name = prompt('Nome da key:')
     if (!name) return
-    const res = await fetch(`${API}/keys`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    })
-    const key = await res.json()
-    setKeys([...keys, key])
+    try {
+      const res = await fetch(`${API}/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        alert(data.error || 'Falha ao criar key')
+        return
+      }
+      const key = await res.json()
+      setKeys([...keys, key])
+    } catch {
+      alert('Falha ao conectar ao servidor')
+    }
   }
 
   async function toggleKey(id, active) {
-    await fetch(`${API}/keys/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active: !active }),
-    })
-    setKeys(keys.map(k => k.id === id ? { ...k, active: !k.active } : k))
+    try {
+      const res = await fetch(`${API}/keys/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: !active }),
+      })
+      if (!res.ok) return
+      setKeys(keys.map(k => k.id === id ? { ...k, active: !k.active } : k))
+    } catch { /* ignore */ }
   }
 
   async function deleteKey(id) {
     if (!confirm('Deletar esta key?')) return
-    await fetch(`${API}/keys/${id}`, { method: 'DELETE' })
-    setKeys(keys.filter(k => k.id !== id))
+    try {
+      const res = await fetch(`${API}/keys/${id}`, { method: 'DELETE' })
+      if (res.ok) setKeys(keys.filter(k => k.id !== id))
+    } catch { /* ignore */ }
   }
 
   function copyToClipboard(text) {

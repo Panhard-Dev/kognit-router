@@ -3,7 +3,7 @@ set -euo pipefail
 
 base="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 config_file="${ZCODE_CONFIG_FILE:-$HOME/.zcode/v2/config.json}"
-node_bin="$base/program/node/bin/node"
+node_bin="node"
 
 token="$("$node_bin" -e '
   const fs = require("fs");
@@ -16,7 +16,7 @@ token="$("$node_bin" -e '
 
 export ZCODE_AUTHORIZATION="Bearer $token"
 export ZCODE_PROXY_DATA_DIR="$base/data/glm5.2proxy"
-export ZCODE_PROXY_PORT="${ZCODE_PROXY_PORT:-3005}"
+export ZCODE_PROXY_PORT="${ZCODE_PROXY_PORT:-3075}"
 export ZCODE_PROXY_HOST="${ZCODE_PROXY_HOST:-127.0.0.1}"
 export ZCODE_CAPTCHA_BRIDGE="true"
 export ZCODE_CAPTCHA_HEADLESS="${ZCODE_CAPTCHA_HEADLESS:-false}"
